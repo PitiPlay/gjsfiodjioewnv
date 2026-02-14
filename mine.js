@@ -28,10 +28,11 @@ const defaultConfig = {
         accent: '#00e5ff'
     },
     defaultTpNick: '9sparserUeutral',
+    moneyTargetNick: '',                 // <-- новый параметр
     autoCollectThreshold: 1,
     batchSize: 100,
-    delayBetweenBatches: 60000, // 1 минута между партиями
-    delayBetweenAccounts: 10000 // 10 секунд между аккаунтами
+    delayBetweenBatches: 60000,
+    delayBetweenAccounts: 10000
 };
 
 let config = { ...defaultConfig };
@@ -97,7 +98,6 @@ if (!fs.existsSync(PROXY_FILE)) fs.writeFileSync(PROXY_FILE, '');
 if (!fs.existsSync(ACCOUNTS_FILE)) fs.writeFileSync(ACCOUNTS_FILE, '');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-// Случайная задержка между min и max
 const randomSleep = (min, max) => sleep(Math.floor(Math.random() * (max - min + 1)) + min);
 
 function getProxies() {
@@ -107,26 +107,22 @@ function getProxies() {
     } catch (e) { return []; }
 }
 
-// Сохранение аккаунтов в файл
 function saveAccountsToFile(accounts) {
     try {
         const existing = fs.readFileSync(ACCOUNTS_FILE, 'utf8');
         const lines = accounts.split('\n').filter(l => l.trim());
         const newAccounts = lines.filter(line => !existing.includes(line.split(' - ')[0]?.trim()));
-        
         if (newAccounts.length > 0) {
             fs.appendFileSync(ACCOUNTS_FILE, '\n' + newAccounts.join('\n'));
             return newAccounts.length;
         }
         return 0;
     } catch (e) {
-        // Если файла нет, создаем новый
         fs.writeFileSync(ACCOUNTS_FILE, accounts);
         return accounts.split('\n').filter(l => l.trim()).length;
     }
 }
 
-// Загрузка аккаунтов из файла с ограничением
 function loadAccountsFromFile(limit = 5000) {
     try {
         const data = fs.readFileSync(ACCOUNTS_FILE, 'utf8');
@@ -137,7 +133,6 @@ function loadAccountsFromFile(limit = 5000) {
     }
 }
 
-// Функция обновления спавнеров
 function refreshSpawnerCount(bot, username) {
     if (!bot || !bot.inventory) return;
     let count = 0;
@@ -147,29 +142,29 @@ function refreshSpawnerCount(bot, username) {
     if (activeBots[username]) activeBots[username].spawners = count;
 }
 
-// ФУНКЦИЯ AFK
 async function goToAfk(bot, username) {
     if (!bot || !bot.entity) return;
     try {
         activeBots[username].status = `🏃 Иду в AFK...`;
         bot.chat('/afk');
-        
-        // Ждем 10 секунд пока откроется меню
         await sleep(10000);
-        
-        // Кликаем на слот 49 в открывшемся меню
         if (bot.currentWindow) {
             activeBots[username].status = `🖱 Выбираю AFK комнату...`;
             await bot.clickWindow(49, 0, 0);
         }
-        
-        // Ждем немного для подтверждения
         await sleep(3000);
-        
         activeBots[username].status = `💤 AFK`;
         activeBots[username].isAfk = true;
         activeBots[username].isCollecting = false;
         activeBots[username].online = true;
+
+        // ---------- НОВОЕ: после AFK автоматически продаём предметы (если есть) ----------
+        if (!activeBots[username].isBuying && !activeBots[username].isCollecting) {
+            setTimeout(() => {
+                sellItems(bot, username);
+            }, 5000);
+        }
+        // ---------- КОНЕЦ ----------
     } catch (e) {
         console.log(`[${username}] Ошибка в AFK:`, e.message);
         activeBots[username].status = '❌ Ошибка AFK';
@@ -178,7 +173,6 @@ async function goToAfk(bot, username) {
     }
 }
 
-// ФУНКЦИЯ СБОРА
 async function startCollect(bot, username, targetNick) {
     if (!activeBots[username] || activeBots[username].isCollecting) return;
     activeBots[username].isCollecting = true;
@@ -188,15 +182,12 @@ async function startCollect(bot, username, targetNick) {
         activeBots[username].status = `✉️ TPA к ${targetNick}...`;
         bot.chat(`/tpa ${targetNick}`);
         await sleep(10000);
-
         if (bot.currentWindow) {
             activeBots[username].status = `🖱 Клик по ячейке 16...`;
             await bot.clickWindow(16, 0, 0);
         }
-
         activeBots[username].status = `⏳ Ожидание 5 мин...`;
-        await sleep(300000); 
-
+        await sleep(300000);
         await goToAfk(bot, username);
     } catch (e) {
         activeBots[username].isCollecting = false;
@@ -204,89 +195,247 @@ async function startCollect(bot, username, targetNick) {
     }
 }
 
-// ФУНКЦИЯ МАССОВОГО СБОРА
 async function collectAllBotsWithSpawners(targetNick = config.defaultTpNick) {
     const botsToCollect = [];
-    
     for (const [username, botData] of Object.entries(activeBots)) {
-        if (botData.online && 
-            !botData.error && 
-            !botData.isCollecting && 
-            botData.spawners >= config.autoCollectThreshold &&
-            botData.botInstance) {
+        if (botData.online && !botData.error && !botData.isCollecting && botData.spawners >= config.autoCollectThreshold && botData.botInstance) {
             botsToCollect.push({ username, bot: botData.botInstance });
         }
     }
-    
     if (botsToCollect.length === 0) return { success: false, message: 'Нет ботов для сбора' };
-    
-    // Запускаем сбор с небольшими задержками чтобы избежать спама
     for (let i = 0; i < botsToCollect.length; i++) {
         const { username, bot } = botsToCollect[i];
         setTimeout(() => {
             startCollect(bot, username, targetNick);
-        }, i * 2000); // Задержка 2 секунды между ботами
+        }, i * 2000);
     }
-    
     return { success: true, count: botsToCollect.length };
 }
 
-// ФУНКЦИЯ ПОКУПКИ СПАВНЕРА
 async function buySpawner(bot, username) {
     if (activeBots[username].isBuying) return;
     activeBots[username].isBuying = true;
-    
     try {
         activeBots[username].status = '🛒 Открываю магазин...';
         bot.chat('/shardshop');
-        
-        // Ждем 5-10 секунд
         await randomSleep(5000, 10000);
-        
-        // Клик по категории спавнеров (ячейка 13)
         if (bot.currentWindow) {
             activeBots[username].status = '🖱 Выбираю категорию...';
             await bot.clickWindow(13, 0, 0);
         } else {
             throw new Error('Окно магазина не открылось');
         }
-        
-        // Ждем 5-15 секунд
         await randomSleep(5000, 15000);
-        
-        // Покупка спавнера (ячейка 15) - 1 спавнер за 500 шардов
         if (bot.currentWindow) {
             activeBots[username].status = '💰 Покупаю спавнер...';
             await bot.clickWindow(15, 0, 0);
         }
-        
-        // Ждем немного перед закрытием
         await randomSleep(2000, 3000);
-        
         if (bot.currentWindow) {
             bot.closeWindow(bot.currentWindow);
         }
-        
-        // Обновляем количество спавнеров
         refreshSpawnerCount(bot, username);
-        
-        // Вычитаем потраченные шарды (500 за спавнер)
         if (activeBots[username].shards >= 500) {
             activeBots[username].shards -= 500;
         }
-        
         activeBots[username].status = '✅ Спавнер куплен!';
-        
     } catch (e) {
         console.log(`[${username}] Ошибка в магазине:`, e.message);
         activeBots[username].status = '❌ Ошибка покупки';
     } finally {
-        // Даем небольшую задержку перед сбросом флага
         setTimeout(() => {
             activeBots[username].isBuying = false;
         }, 5000);
     }
 }
+
+// ---------- НОВЫЙ БЛОК: ПРЕДМЕТЫ ДЛЯ ПРОДАЖИ И ФУНКЦИИ ----------
+const SELL_ITEMS = [
+    'stone_sword',
+    'chainmail_leggings',
+    'chainmail_chestplate',
+    'chainmail_boots',
+    'chainmail_helmet',
+    'steak'
+];
+
+function formatMoney(amount) {
+    if (amount >= 1e9) return (amount / 1e9).toFixed(2) + 'B';
+    if (amount >= 1e6) return (amount / 1e6).toFixed(2) + 'M';
+    if (amount >= 1e3) return (amount / 1e3).toFixed(2) + 'K';
+    return amount.toString();
+}
+
+// Снятие брони, которая подлежит продаже
+async function unequipSellItems(bot, username) {
+    const armorSlots = [5, 6, 7, 8]; // helmet, chestplate, leggings, boots
+    for (let slot of armorSlots) {
+        const item = bot.inventory.slots[slot];
+        if (item && SELL_ITEMS.includes(item.name)) {
+            try {
+                // shift+клик по слоту брони, чтобы переместить в инвентарь
+                await bot.clickWindow(slot, 1, 0);
+                await sleep(300);
+                activeBots[username].status = `🔄 Снял ${item.name}`;
+            } catch (e) {
+                console.log(`[${username}] Ошибка при снятии брони:`, e.message);
+            }
+        }
+    }
+}
+
+async function sellItems(bot, username) {
+    if (!bot || !bot.entity || !bot.inventory) return;
+    
+    // Проверяем наличие предметов для продажи (включая броню)
+    const itemsToSell = bot.inventory.slots.filter(slot => slot && SELL_ITEMS.includes(slot.name));
+    if (itemsToSell.length === 0) {
+        console.log(`[${username}] Нет предметов для продажи`);
+        return;
+    }
+
+    activeBots[username].status = '💰 Открываю меню продажи...';
+    bot.chat('/sell');
+    
+    const window = await new Promise(resolve => {
+        const onWindow = (window) => {
+            bot.removeListener('windowOpen', onWindow);
+            resolve(window);
+        };
+        bot.once('windowOpen', onWindow);
+        setTimeout(() => resolve(null), 10000);
+    });
+    
+    if (!window) {
+        activeBots[username].status = '❌ Окно не открылось';
+        return;
+    }
+    
+    await sleep(1000);
+    
+    // Сначала снимаем броню, если она надета
+    await unequipSellItems(bot, username);
+    await sleep(1000);
+    
+    activeBots[username].status = '📦 Переношу предметы...';
+    
+    const invStart = window.inventoryStart;
+    const invEnd = window.inventoryEnd;
+    
+    // Находим целевой слот в окне (первый пустой, иначе 0)
+    let targetSlot = -1;
+    for (let i = 0; i < invStart; i++) {
+        if (!window.slots[i]) {
+            targetSlot = i;
+            break;
+        }
+    }
+    if (targetSlot === -1) targetSlot = 0;
+    
+    for (let i = invStart; i <= invEnd; i++) {
+        const item = window.slots[i];
+        if (item && SELL_ITEMS.includes(item.name)) {
+            try {
+                await bot.clickWindow(i, 0, 0);
+                await sleep(200);
+                await bot.clickWindow(targetSlot, 0, 0);
+                await sleep(200);
+            } catch (e) {
+                console.log(`[${username}] Ошибка при переносе предмета из слота ${i}:`, e.message);
+            }
+        }
+    }
+    
+    await sleep(1000);
+    if (bot.currentWindow) {
+        bot.closeWindow(bot.currentWindow);
+    }
+    
+    activeBots[username].status = '✅ Продажа завершена';
+}
+
+async function transferMoney(bot, username, targetNick) {
+    if (!bot || !bot.entity) return;
+    const balance = activeBots[username].balance;
+    if (!balance || balance <= 0) {
+        console.log(`[${username}] Нет денег для перевода`);
+        return;
+    }
+    const formatted = formatMoney(balance);
+    activeBots[username].status = `💸 Перевод ${formatted} -> ${targetNick}`;
+    bot.chat(`/pay ${targetNick} ${formatted}`);
+}
+
+// ---------- НОВАЯ ФУНКЦИЯ КОНСОЛИДАЦИИ ДЕНЕГ ----------
+async function consolidateMoney(targetNick) {
+    if (!targetNick) {
+        targetNick = config.moneyTargetNick;
+        if (!targetNick) return { success: false, message: 'Не указан целевой ник' };
+    }
+
+    // Получаем список всех онлайн ботов с балансом > 0
+    const botsWithMoney = [];
+    for (const [username, botData] of Object.entries(activeBots)) {
+        if (botData.online && !botData.error && botData.balance > 0 && !botData.isCollecting && !botData.isBuying && botData.botInstance) {
+            botsWithMoney.push({ username, bot: botData.botInstance, balance: botData.balance });
+        }
+    }
+
+    if (botsWithMoney.length === 0) return { success: false, message: 'Нет ботов с деньгами' };
+
+    // Если ботов мало, просто переводим всех напрямую на target
+    if (botsWithMoney.length <= 3) {
+        for (let i = 0; i < botsWithMoney.length; i++) {
+            setTimeout(() => {
+                transferMoney(botsWithMoney[i].bot, botsWithMoney[i].username, targetNick);
+            }, i * 2000);
+        }
+        return { success: true, count: botsWithMoney.length, method: 'direct' };
+    }
+
+    // Разделяем на две группы
+    const half = Math.floor(botsWithMoney.length / 2);
+    const group1 = botsWithMoney.slice(0, half);
+    const group2 = botsWithMoney.slice(half);
+
+    // Выбираем двух сборщиков (первые из каждой группы, можно любых)
+    const collector1 = group1[0];
+    const collector2 = group2[0];
+
+    // Остальные переводят на своих сборщиков
+    const others1 = group1.slice(1);
+    const others2 = group2.slice(1);
+
+    let delay = 0;
+    for (let bot of others1) {
+        setTimeout(() => {
+            transferMoney(bot.bot, bot.username, collector1.username);
+        }, delay * 2000);
+        delay++;
+    }
+    for (let bot of others2) {
+        setTimeout(() => {
+            transferMoney(bot.bot, bot.username, collector2.username);
+        }, delay * 2000);
+        delay++;
+    }
+
+    // Ждём, пока переводы пройдут (даём запас времени)
+    const waitTime = (delay + 5) * 2000;
+    setTimeout(async () => {
+        // Проверяем баланс сборщиков (они могли уже получить деньги)
+        // Для простоты просто переводим с них на target
+        setTimeout(() => {
+            transferMoney(collector1.bot, collector1.username, targetNick);
+        }, 1000);
+        setTimeout(() => {
+            transferMoney(collector2.bot, collector2.username, targetNick);
+        }, 4000);
+    }, waitTime);
+
+    return { success: true, count: botsWithMoney.length, method: 'two-level' };
+}
+// ---------- КОНЕЦ НОВОГО БЛОКА ----------
 
 // Глобальный счетчик для ротации прокси
 let proxyRotationIndex = 0;
@@ -294,44 +443,31 @@ let proxyRotationIndex = 0;
 function getNextProxy() {
     const proxies = getProxies();
     if (proxies.length === 0) return null;
-    
-    // Берем следующий прокси по кругу
     const proxy = proxies[proxyRotationIndex % proxies.length];
     proxyRotationIndex++;
-    
     return proxy;
 }
 
-// Очередь на подключение
 const connectionQueue = [];
 let isProcessingQueue = false;
 
-// Функция для обработки очереди подключений
 async function processConnectionQueue() {
     if (isProcessingQueue || connectionQueue.length === 0) return;
-    
     isProcessingQueue = true;
-    
     while (connectionQueue.length > 0) {
         const { token, index, retryCount } = connectionQueue.shift();
-        
         try {
             await createBotFromToken(token, index, retryCount);
-            
-            // Задержка между подключениями
             await sleep(5000);
         } catch (e) {
             console.log('Ошибка в очереди подключений:', e.message);
         }
     }
-    
     isProcessingQueue = false;
 }
 
-// Добавление в очередь подключений
 function addToConnectionQueue(token, index, retryCount = 0) {
     connectionQueue.push({ token, index, retryCount });
-    
     if (!isProcessingQueue) {
         setTimeout(processConnectionQueue, 100);
     }
@@ -341,7 +477,6 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
     return new Promise((resolve) => {
         let botCreated = false;
         let connectionWatchdog = null;
-        
         try {
             const cleanToken = token.includes(' - ') ? token.split(' - ')[1].trim() : token.trim();
             const payload = JSON.parse(Buffer.from(cleanToken.split('.')[1], 'base64').toString());
@@ -349,7 +484,6 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
             const uuid = payload.pfd[0].id.replace(/-/g, '');
             const expiryTime = payload.exp * 1000;
 
-            // Получаем прокси с ротацией
             const proxyUrl = getNextProxy();
             if (!proxyUrl) {
                 console.log(`[${username}] Нет доступных прокси`);
@@ -357,7 +491,6 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
                 return;
             }
 
-            // Инициализируем данные бота если их нет
             if (!activeBots[username]) {
                 activeBots[username] = { 
                     status: '🔌 Подключение...', 
@@ -365,6 +498,7 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
                     error: false,
                     shards: 0,
                     spawners: 0,
+                    balance: 0,
                     proxy: proxyUrl.split('@')[1]?.split(':')[0] || "Proxy", 
                     isAfk: false,
                     isBuying: false,
@@ -375,18 +509,6 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
                     lastConnectAttempt: Date.now()
                 };
             } else {
-                // Проверяем, не пытались ли мы подключиться недавно
-                const timeSinceLastAttempt = Date.now() - (activeBots[username].lastConnectAttempt || 0);
-                if (timeSinceLastAttempt < 30000) { // 30 секунд между попытками
-                    console.log(`[${username}] Слишком частые попытки подключения`);
-                    setTimeout(() => {
-                        addToConnectionQueue(token, botIndex, retryCount);
-                    }, 30000 - timeSinceLastAttempt);
-                    resolve(false);
-                    return;
-                }
-                
-                // Обновляем статус для существующего бота
                 activeBots[username].status = '🔌 Подключение...';
                 activeBots[username].online = false;
                 activeBots[username].error = false;
@@ -425,12 +547,9 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
                     console.log(`[${username}] Таймаут подключения`);
                     activeBots[username].status = '⏱️ Таймаут подключения';
                     activeBots[username].error = true;
-                    
                     try {
                         if (bot && bot.quit) bot.quit();
                     } catch (e) {}
-                    
-                    // Пытаемся переподключиться
                     if (Date.now() < expiryTime && retryCount < 3) {
                         setTimeout(() => {
                             addToConnectionQueue(token, botIndex, retryCount + 1);
@@ -442,7 +561,6 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
 
             activeBots[username].botInstance = bot;
 
-            // Сохранение сессии
             const botPath = path.join(SESSIONS_DIR, username);
             if (!fs.existsSync(botPath)) fs.mkdirSync(botPath, { recursive: true });
             fs.writeFileSync(path.join(botPath, 'mca-cache.json'), JSON.stringify({ 
@@ -452,45 +570,40 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
                 expires: expiryTime
             }));
 
-            // Обработчик успешного подключения
             bot.once('spawn', () => {
                 botCreated = true;
                 if (connectionWatchdog) clearTimeout(connectionWatchdog);
-                
                 console.log(`[${username}] Успешно подключен`);
                 activeBots[username].status = '🌍 В сети';
                 activeBots[username].online = true;
                 activeBots[username].error = false;
                 activeBots[username].reconnectAttempts = 0;
 
-                // Обновляем инвентарь при изменении
                 bot.inventory.on('updateSlot', () => refreshSpawnerCount(bot, username));
 
-                // Интервал для проверки шардов
                 const shardInterval = setInterval(() => {
-                    if (bot.entity && 
-                        !activeBots[username].isBuying && 
-                        !activeBots[username].isCollecting && 
-                        bot.health > 0) {
+                    if (bot.entity && !activeBots[username].isBuying && !activeBots[username].isCollecting && bot.health > 0) {
                         bot.chat('/shards');
                     }
                 }, 180000);
 
-                // Начальные действия после спауна
+                const moneyInterval = setInterval(() => {
+                    if (bot.entity && !activeBots[username].isBuying && !activeBots[username].isCollecting && bot.health > 0) {
+                        bot.chat('/money');
+                    }
+                }, 120000);
+
                 setTimeout(async () => {
                     if (!bot.entity || bot.health <= 0) return;
-                    
                     try {
                         bot.chat('/shards');
-                        await sleep(5000); 
+                        await sleep(5000);
                         refreshSpawnerCount(bot, username);
-                        
                         if (activeBots[username].shards >= 500) {
                             setTimeout(() => {
                                 buySpawner(bot, username);
                             }, 3000);
                         }
-                        
                         if (!activeBots[username].isCollecting) {
                             setTimeout(() => {
                                 goToAfk(bot, username);
@@ -501,90 +614,71 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
                     }
                 }, 10000);
 
-                // Очистка интервала при отключении
                 bot.once('end', () => {
                     clearInterval(shardInterval);
+                    clearInterval(moneyInterval);
                 });
                 
                 resolve(true);
             });
 
-            // Обработчик сообщений чата
             bot.on('message', (m) => {
                 try {
                     const txt = m.toString();
                     const shardMatch = txt.match(/Your shard[s]?[:]?\s?([\d,]+)/i);
-                    
                     if (shardMatch) {
                         const shards = parseInt(shardMatch[1].replace(/,/g, ''));
                         activeBots[username].shards = shards;
-                        
-                        if (shards >= 500 && 
-                            !activeBots[username].isBuying && 
-                            !activeBots[username].isCollecting && 
-                            activeBots[username].isAfk) {
-                            // Запускаем покупку с небольшой задержкой
+                        if (shards >= 500 && !activeBots[username].isBuying && !activeBots[username].isCollecting && activeBots[username].isAfk) {
                             setTimeout(() => {
                                 buySpawner(bot, username);
                             }, 3000);
                         }
                     }
-                } catch (e) {
-                    // Игнорируем ошибки парсинга сообщений
-                }
+                    const moneyMatch = txt.match(/you have \$([\d,]+(?:\.\d+)?)([KMB])?/i);
+                    if (moneyMatch) {
+                        let amount = parseFloat(moneyMatch[1].replace(/,/g, ''));
+                        const suffix = moneyMatch[2];
+                        if (suffix) {
+                            const s = suffix.toUpperCase();
+                            if (s === 'K') amount *= 1000;
+                            else if (s === 'M') amount *= 1e6;
+                            else if (s === 'B') amount *= 1e9;
+                        }
+                        activeBots[username].balance = amount;
+                    }
+                } catch (e) {}
             });
 
-            // Обработчик ошибок с улучшенной логикой
             bot.on('error', (err) => {
                 console.log(`[${username}] Ошибка бота:`, err.code || err.message);
-                
                 if (connectionWatchdog) clearTimeout(connectionWatchdog);
-                
                 activeBots[username].error = true;
                 activeBots[username].online = false;
                 botCreated = false;
-                
-                // Игнорируем некоторые ошибки
-                const ignorableErrors = [
-                    'ECONNABORTED', 
-                    'ECONNRESET', 
-                    'ETIMEDOUT', 
-                    'EPIPE',
-                    'EHOSTUNREACH',
-                    'ENOTFOUND'
-                ];
-                
+                const ignorableErrors = ['ECONNABORTED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'ENOTFOUND'];
                 if (ignorableErrors.includes(err.code)) {
                     console.log(`[${username}] Сетевая ошибка (${err.code}), переподключение...`);
                     activeBots[username].status = `🔌 Ошибка сети (${err.code})`;
                 } else {
                     activeBots[username].status = `❌ Ошибка: ${err.code || err.message.substring(0, 30)}`;
                 }
-                
-                // Пытаемся переподключиться если сессия еще действует
                 if (Date.now() < expiryTime && retryCount < 3) {
                     setTimeout(() => {
                         addToConnectionQueue(token, botIndex, retryCount + 1);
                     }, 30000);
                 }
-                
                 resolve(false);
             });
 
-            // Обработчик отключения
             bot.on('end', (reason) => {
                 console.log(`[${username}] Отключен:`, reason || 'Неизвестная причина');
-                
                 if (connectionWatchdog) clearTimeout(connectionWatchdog);
-                
                 activeBots[username].online = false;
-                
                 if (Date.now() < expiryTime) {
                     if (activeBots[username].reconnectAttempts < 5) {
                         console.log(`[${username}] Планирую переподключение...`);
                         activeBots[username].status = '🔄 Переподключение...';
-                        
-                        // Задержка перед переподключением
                         setTimeout(() => {
                             addToConnectionQueue(token, botIndex, retryCount + 1);
                         }, 30000);
@@ -594,31 +688,27 @@ function createBotFromToken(token, botIndex, retryCount = 0) {
                 } else {
                     activeBots[username].status = '💀 Сессия истекла';
                 }
-                
                 resolve(false);
             });
 
         } catch (e) { 
             console.log(`[Ошибка старта] ${e.message}`);
-            
-            // Пытаемся переподключиться при ошибке инициализации
             if (username && token && retryCount < 3) {
                 setTimeout(() => {
                     addToConnectionQueue(token, botIndex, retryCount + 1);
                 }, 10000);
             }
-            
             resolve(false);
         }
     });
 }
 
-// Статистика для отображения
 let serverStats = {
     totalAccounts: 0,
     accountsInFile: 0,
     totalShards: 0,
     totalSpawners: 0,
+    totalMoney: 0,          // <-- добавлено
     online: 0,
     errors: 0,
     offline: 0,
@@ -627,13 +717,13 @@ let serverStats = {
     afk: 0
 };
 
-// Функция обновления статистики
 function updateStats() {
     const stats = {
         totalAccounts: Object.keys(activeBots).length,
         accountsInFile: loadAccountsFromFile().length,
         totalShards: 0,
         totalSpawners: 0,
+        totalMoney: 0,
         online: 0,
         errors: 0,
         offline: 0,
@@ -641,62 +731,45 @@ function updateStats() {
         collecting: 0,
         afk: 0
     };
-    
     for (const [username, botData] of Object.entries(activeBots)) {
         stats.totalShards += (botData.shards || 0);
         stats.totalSpawners += (botData.spawners || 0);
-        
+        stats.totalMoney += (botData.balance || 0);
         if (botData.error) stats.errors++;
         else if (botData.online) stats.online++;
         else stats.offline++;
-        
         if (botData.isBuying) stats.buying++;
         if (botData.isCollecting) stats.collecting++;
         if (botData.isAfk) stats.afk++;
     }
-    
     serverStats = stats;
     return stats;
 }
 
-// Функция для добавления партии аккаунтов
 async function addBatch(batchNumber, totalBatches) {
     if (!progress.isAdding) return;
-    
     const startIdx = (batchNumber - 1) * config.batchSize;
     const endIdx = Math.min(startIdx + config.batchSize, progress.total);
     const batch = progress.accountsQueue.slice(startIdx, endIdx);
-    
     console.log(`Добавляю партию ${batchNumber}/${totalBatches}: ${batch.length} аккаунтов`);
-    
     progress.currentBatch = batchNumber;
     saveProgress();
-    
-    // Добавляем аккаунты из этой партии
     for (let i = 0; i < batch.length; i++) {
         if (!progress.isAdding) break;
-        
         const line = batch[i];
         addToConnectionQueue(line.trim(), progress.added + i);
-        
-        // Задержка между аккаунтами
         await sleep(config.delayBetweenAccounts);
     }
-    
     progress.added += batch.length;
     progress.pending = progress.total - progress.added;
     progress.lastAdded = Date.now();
     saveProgress();
-    
-    // Если есть еще аккаунты, планируем следующую партию
     if (progress.added < progress.total && progress.isAdding) {
         console.log(`Планирую следующую партию через ${config.delayBetweenBatches/1000} сек.`);
-        
         setTimeout(() => {
             addBatch(batchNumber + 1, totalBatches);
         }, config.delayBetweenBatches);
     } else {
-        // Все аккаунты добавлены
         progress.isAdding = false;
         progress.accountsQueue = [];
         saveProgress();
@@ -704,15 +777,11 @@ async function addBatch(batchNumber, totalBatches) {
     }
 }
 
-// Функция для начала добавления аккаунтов
 function startAddingAccounts(accountsText) {
     const lines = accountsText.split('\n').filter(l => l.trim());
     const totalLines = lines.length;
     const savedCount = saveAccountsToFile(accountsText);
-    
     console.log(`Загружено ${totalLines} аккаунтов, сохранено ${savedCount} новых`);
-    
-    // Инициализируем прогресс
     progress.total = totalLines;
     progress.added = 0;
     progress.pending = totalLines;
@@ -722,80 +791,45 @@ function startAddingAccounts(accountsText) {
     progress.lastAdded = Date.now();
     progress.accountsQueue = lines;
     saveProgress();
-    
-    // Начинаем добавление первой партии
     addBatch(1, progress.totalBatches);
-    
-    return { 
-        total: totalLines, 
-        saved: savedCount,
-        batches: progress.totalBatches,
-        message: `Начато добавление ${totalLines} аккаунтов (${progress.totalBatches} партий)`
-    };
+    return { total: totalLines, saved: savedCount, batches: progress.totalBatches, message: `Начато добавление ${totalLines} аккаунтов (${progress.totalBatches} партий)` };
 }
 
-// Функция для продолжения добавления аккаунтов
 function continueAddingAccounts() {
     if (!progress.isAdding && progress.pending > 0) {
         progress.isAdding = true;
         saveProgress();
-        
         const currentBatch = Math.floor(progress.added / config.batchSize) + 1;
         const totalBatches = progress.totalBatches;
-        
         console.log(`Продолжаю добавление с партии ${currentBatch}/${totalBatches}`);
-        
         addBatch(currentBatch, totalBatches);
-        
-        return { 
-            success: true, 
-            message: `Продолжено добавление с партии ${currentBatch}/${totalBatches}` 
-        };
+        return { success: true, message: `Продолжено добавление с партии ${currentBatch}/${totalBatches}` };
     }
-    
-    return { 
-        success: false, 
-        message: 'Нет аккаунтов для добавления или уже идет процесс' 
-    };
+    return { success: false, message: 'Нет аккаунтов для добавления или уже идет процесс' };
 }
 
-// Функция для остановки добавления
 function stopAddingAccounts() {
     progress.isAdding = false;
     saveProgress();
-    
-    return { 
-        success: true, 
-        message: 'Добавление аккаунтов остановлено' 
-    };
+    return { success: true, message: 'Добавление аккаунтов остановлено' };
 }
 
-// Загрузка сессий при старте
 function loadSessions() {
     try {
-        const savedFolders = fs.readdirSync(SESSIONS_DIR).filter(f => 
-            fs.lstatSync(path.join(SESSIONS_DIR, f)).isDirectory()
-        );
-        
+        const savedFolders = fs.readdirSync(SESSIONS_DIR).filter(f => fs.lstatSync(path.join(SESSIONS_DIR, f)).isDirectory());
         console.log(`Найдено сохраненных сессий: ${savedFolders.length}`);
-        
-        // Ограничиваем количество одновременно загружаемых сессий
         const maxConcurrent = 10;
         let currentIndex = 0;
-        
         function loadBatch() {
             const batch = savedFolders.slice(currentIndex, currentIndex + maxConcurrent);
             currentIndex += maxConcurrent;
-            
             batch.forEach((name, i) => {
                 const cachePath = path.join(SESSIONS_DIR, name, 'mca-cache.json');
                 if (fs.existsSync(cachePath)) {
-                    const delay = i * 5000; // 5 секунд между ботами в батче
-                    
+                    const delay = i * 5000;
                     setTimeout(() => {
                         try {
                             const data = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-                            
                             if (data.expires && Date.now() < data.expires) {
                                 addToConnectionQueue(data.accessToken, i);
                             }
@@ -805,52 +839,40 @@ function loadSessions() {
                     }, delay);
                 }
             });
-            
             if (currentIndex < savedFolders.length) {
-                setTimeout(loadBatch, 30000); // Следующий батч через 30 секунд
+                setTimeout(loadBatch, 30000);
             }
         }
-        
         loadBatch();
     } catch (e) {
         console.log('Ошибка загрузки сессий:', e.message);
     }
 }
 
-// Запускаем загрузку сессий с задержкой
 setTimeout(loadSessions, 5000);
 
-// Функция для принудительного переподключения всех ботов
 function reconnectAllBots() {
     console.log('Принудительное переподключение всех ботов...');
     let count = 0;
-    
     for (const [username, botData] of Object.entries(activeBots)) {
-        // Загружаем токен из сохраненной сессии
         const cachePath = path.join(SESSIONS_DIR, username, 'mca-cache.json');
         if (fs.existsSync(cachePath)) {
             try {
                 const data = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-                
-                // Отключаем текущего бота если он есть
                 if (botData.botInstance && botData.botInstance.quit) {
                     try {
                         botData.botInstance.quit();
                     } catch (e) {}
                 }
-                
-                // Запускаем нового с задержкой
                 setTimeout(() => {
                     addToConnectionQueue(data.accessToken, count);
                 }, count * 5000);
-                
                 count++;
             } catch (e) {
                 console.log(`[${username}] Ошибка при переподключении:`, e.message);
             }
         }
     }
-    
     return { success: true, count };
 }
 
@@ -873,23 +895,10 @@ app.post('/collect-all', (req, res) => {
 app.post('/add-bulk', async (req, res) => {
     try {
         const { text } = req.body;
-        
-        if (!text || text.trim().length === 0) {
-            return res.status(400).json({ error: 'Пустой текст' });
-        }
-        
+        if (!text || text.trim().length === 0) return res.status(400).json({ error: 'Пустой текст' });
         console.log('Получен запрос на добавление аккаунтов, длина текста:', text.length);
-        
-        // Обрабатываем асинхронно и сразу возвращаем ответ
         const result = startAddingAccounts(text);
-        
-        res.json({ 
-            ok: true, 
-            message: result.message,
-            total: result.total,
-            batches: result.batches
-        });
-        
+        res.json({ ok: true, message: result.message, total: result.total, batches: result.batches });
     } catch (e) {
         console.error('Ошибка в /add-bulk:', e.message);
         res.status(500).json({ error: e.message });
@@ -918,13 +927,7 @@ app.post('/add-from-file', (req, res) => {
     try {
         const accounts = loadAccountsFromFile();
         const result = startAddingAccounts(accounts.join('\n'));
-        
-        res.json({ 
-            ok: true, 
-            message: 'Аккаунты из файла начали добавляться',
-            count: accounts.length,
-            batches: result.batches
-        });
+        res.json({ ok: true, message: 'Аккаунты из файла начали добавляться', count: accounts.length, batches: result.batches });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -933,10 +936,7 @@ app.post('/add-from-file', (req, res) => {
 app.get('/accounts-file-info', (req, res) => {
     try {
         const accounts = loadAccountsFromFile();
-        res.json({ 
-            count: accounts.length,
-            accounts: accounts.slice(0, 10)
-        });
+        res.json({ count: accounts.length, accounts: accounts.slice(0, 10) });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -958,12 +958,14 @@ app.post('/clear-accounts-file', (req, res) => {
 app.post('/update-config', (req, res) => {
     try {
         const newConfig = req.body;
-        
         if (newConfig.theme) {
             config.theme = { ...config.theme, ...newConfig.theme };
         }
         if (newConfig.defaultTpNick !== undefined) {
             config.defaultTpNick = newConfig.defaultTpNick;
+        }
+        if (newConfig.moneyTargetNick !== undefined) {   // <-- новый параметр
+            config.moneyTargetNick = newConfig.moneyTargetNick;
         }
         if (newConfig.autoCollectThreshold !== undefined) {
             config.autoCollectThreshold = parseInt(newConfig.autoCollectThreshold) || 1;
@@ -977,7 +979,6 @@ app.post('/update-config', (req, res) => {
         if (newConfig.delayBetweenAccounts !== undefined) {
             config.delayBetweenAccounts = parseInt(newConfig.delayBetweenAccounts) || 10000;
         }
-        
         saveConfig();
         res.json({ ok: true, config });
     } catch (e) {
@@ -993,30 +994,20 @@ app.post('/reconnect-all', (req, res) => {
 app.post('/reconnect-bot', (req, res) => {
     const { botName } = req.body;
     const botData = activeBots[botName];
-    
-    if (!botData) {
-        return res.status(404).json({ error: 'Бот не найден' });
-    }
-    
+    if (!botData) return res.status(404).json({ error: 'Бот не найден' });
     const cachePath = path.join(SESSIONS_DIR, botName, 'mca-cache.json');
     if (fs.existsSync(cachePath)) {
         try {
             const data = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-            
-            // Отключаем текущего бота если он есть
             if (botData.botInstance && botData.botInstance.quit) {
                 try {
                     botData.botInstance.quit();
                 } catch (e) {}
             }
-            
-            // Запускаем нового
             setTimeout(() => {
                 addToConnectionQueue(data.accessToken, 0);
             }, 1000);
-            
             res.json({ ok: true, message: 'Переподключение запущено' });
-            
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -1025,16 +1016,63 @@ app.post('/reconnect-bot', (req, res) => {
     }
 });
 
+// Продажа предметов у всех ботов
+app.post('/sell-all', (req, res) => {
+    let count = 0;
+    for (const [username, botData] of Object.entries(activeBots)) {
+        if (botData.online && !botData.error && !botData.isCollecting && !botData.isBuying && botData.botInstance) {
+            setTimeout(() => {
+                sellItems(botData.botInstance, username);
+            }, count * 3000);
+            count++;
+        }
+    }
+    res.json({ ok: true, count });
+});
+
+// Перевод денег от всех ботов указанному игроку (простой)
+app.post('/transfer-all', (req, res) => {
+    const { targetNick } = req.body;
+    if (!targetNick) return res.status(400).json({ error: 'Не указан ник' });
+    let count = 0;
+    for (const [username, botData] of Object.entries(activeBots)) {
+        if (botData.online && !botData.error && botData.balance > 0 && !botData.isCollecting && !botData.isBuying && botData.botInstance) {
+            setTimeout(() => {
+                transferMoney(botData.botInstance, username, targetNick);
+            }, count * 2000);
+            count++;
+        }
+    }
+    res.json({ ok: true, count });
+});
+
+// Перевод денег от конкретного бота
+app.post('/transfer-single', (req, res) => {
+    const { botName, targetNick } = req.body;
+    if (!botName || !targetNick) return res.status(400).json({ error: 'Не указан бот или ник' });
+    const botData = activeBots[botName];
+    if (!botData || !botData.online || botData.error || botData.balance <= 0 || botData.isCollecting || botData.isBuying) {
+        return res.status(400).json({ error: 'Бот не может перевести деньги' });
+    }
+    transferMoney(botData.botInstance, botName, targetNick);
+    res.json({ ok: true });
+});
+
+// ---------- НОВЫЙ ЭНДПОИНТ ДЛЯ КОНСОЛИДАЦИИ ДЕНЕГ ----------
+app.post('/consolidate-money', async (req, res) => {
+    const { targetNick } = req.body;
+    const result = await consolidateMoney(targetNick);
+    res.json(result);
+});
+// ---------- КОНЕЦ ----------
+
 app.get('/config', (req, res) => {
     res.json(config);
 });
 
 app.get('/proxies', (req, res) => {
     const proxies = getProxies();
-    res.json({ 
-        count: proxies.length, 
-        proxies: proxies.map(p => p.split('@')[1] || p) 
-    });
+    res.json({ count: proxies.length, proxies: proxies.map(p => p.split('@')[1] || p) });
 });
 
 app.get('/status', (req, res) => {
@@ -1057,7 +1095,6 @@ app.get('/stats', (req, res) => {
 
 app.get('/server-status', (req, res) => {
     const stats = updateStats();
-    
     res.json({
         ...stats,
         uptime: process.uptime(),
@@ -1082,7 +1119,6 @@ app.get('/', (req, res) => {
                     --text: ${config.theme.text};
                     --accent: ${config.theme.accent};
                 }
-                
                 body {
                     font-family: 'Segoe UI', sans-serif;
                     background: var(--background);
@@ -1091,12 +1127,10 @@ app.get('/', (req, res) => {
                     margin: 0;
                     transition: all 0.3s;
                 }
-                
                 .container {
                     max-width: 1400px;
                     margin: 0 auto;
                 }
-                
                 .header {
                     text-align: center;
                     margin-bottom: 20px;
@@ -1105,7 +1139,6 @@ app.get('/', (req, res) => {
                     border-radius: 15px;
                     border: 1px solid #222;
                 }
-                
                 .stats {
                     display: flex;
                     justify-content: center;
@@ -1114,7 +1147,6 @@ app.get('/', (req, res) => {
                     font-size: 14px;
                     flex-wrap: wrap;
                 }
-                
                 .stat-item {
                     padding: 8px 15px;
                     border-radius: 10px;
@@ -1122,32 +1154,27 @@ app.get('/', (req, res) => {
                     min-width: 100px;
                     text-align: center;
                 }
-                
                 .main-content {
                     display: flex;
                     gap: 20px;
                     margin-top: 20px;
                     flex-wrap: wrap;
                 }
-                
                 .panel {
                     background: var(--secondary);
                     padding: 20px;
                     border-radius: 12px;
                     border: 1px solid #222;
                 }
-                
                 .left-panel {
                     width: 380px;
                     min-width: 380px;
                 }
-                
                 .right-panel {
                     flex-grow: 1;
                     max-height: 70vh;
                     overflow-y: auto;
                 }
-                
                 textarea {
                     width: 100%;
                     height: 200px;
@@ -1162,7 +1189,6 @@ app.get('/', (req, res) => {
                     border-radius: 5px;
                     resize: vertical;
                 }
-                
                 button {
                     padding: 10px 15px;
                     background: var(--primary);
@@ -1174,31 +1200,24 @@ app.get('/', (req, res) => {
                     transition: opacity 0.2s;
                     font-size: 14px;
                 }
-                
                 button:hover {
                     opacity: 0.9;
                 }
-                
                 button.secondary {
                     background: #333;
                 }
-                
                 button.danger {
                     background: #f44336;
                 }
-                
                 button.warning {
                     background: #FF9800;
                 }
-                
                 button.info {
                     background: #2196F3;
                 }
-                
                 button.success {
                     background: #4CAF50;
                 }
-                
                 .bot-card {
                     margin-bottom: 10px;
                     padding: 12px;
@@ -1210,20 +1229,16 @@ app.get('/', (req, res) => {
                     align-items: center;
                     transition: transform 0.2s;
                 }
-                
                 .bot-card:hover {
                     transform: translateY(-2px);
                 }
-                
                 .bot-info {
                     flex-grow: 1;
                 }
-                
                 .bot-stats {
                     text-align: right;
                     min-width: 160px;
                 }
-                
                 .modal {
                     display: none;
                     position: fixed;
@@ -1236,7 +1251,6 @@ app.get('/', (req, res) => {
                     align-items: center;
                     justify-content: center;
                 }
-                
                 .modal-content {
                     background: var(--secondary);
                     padding: 30px;
@@ -1246,17 +1260,14 @@ app.get('/', (req, res) => {
                     max-height: 80vh;
                     overflow-y: auto;
                 }
-                
                 .form-group {
                     margin-bottom: 15px;
                 }
-                
                 label {
                     display: block;
                     margin-bottom: 5px;
                     color: #aaa;
                 }
-                
                 input, select {
                     width: 100%;
                     padding: 8px;
@@ -1265,32 +1276,27 @@ app.get('/', (req, res) => {
                     color: var(--text);
                     border-radius: 4px;
                 }
-                
                 .color-input {
                     display: flex;
                     gap: 10px;
                     align-items: center;
                 }
-                
                 .color-input input[type="color"] {
                     width: 40px;
                     height: 40px;
                     padding: 0;
                 }
-                
                 .action-buttons {
                     display: flex;
                     gap: 10px;
                     margin-top: 10px;
                     flex-wrap: wrap;
                 }
-                
                 .proxy-info {
                     font-size: 12px;
                     color: #777;
                     margin-top: 5px;
                 }
-                
                 .status-dot {
                     display: inline-block;
                     width: 10px;
@@ -1298,7 +1304,6 @@ app.get('/', (req, res) => {
                     border-radius: 50%;
                     margin-right: 5px;
                 }
-                
                 .status-online { background: #4CAF50; }
                 .status-error { background: #f44336; }
                 .status-offline { background: #777; }
@@ -1306,7 +1311,6 @@ app.get('/', (req, res) => {
                 .status-buying { background: #9c27b0; }
                 .status-collecting { background: #FF9800; }
                 .status-adding { background: #FF9800; }
-                
                 .tab-buttons {
                     display: flex;
                     gap: 5px;
@@ -1314,7 +1318,6 @@ app.get('/', (req, res) => {
                     border-bottom: 1px solid #333;
                     padding-bottom: 10px;
                 }
-                
                 .tab-button {
                     padding: 8px 15px;
                     background: #222;
@@ -1324,20 +1327,16 @@ app.get('/', (req, res) => {
                     border-radius: 5px 5px 0 0;
                     transition: all 0.3s;
                 }
-                
                 .tab-button.active {
                     background: var(--primary);
                     color: white;
                 }
-                
                 .tab-content {
                     display: none;
                 }
-                
                 .tab-content.active {
                     display: block;
                 }
-                
                 .progress-container {
                     margin: 15px 0;
                     padding: 15px;
@@ -1345,7 +1344,6 @@ app.get('/', (req, res) => {
                     border-radius: 8px;
                     border: 1px solid #333;
                 }
-                
                 .progress-bar {
                     width: 100%;
                     height: 20px;
@@ -1354,20 +1352,17 @@ app.get('/', (req, res) => {
                     overflow: hidden;
                     margin: 10px 0;
                 }
-                
                 .progress-fill {
                     height: 100%;
                     background: var(--primary);
                     transition: width 0.3s;
                 }
-                
                 .progress-info {
                     display: flex;
                     justify-content: space-between;
                     font-size: 12px;
                     color: #aaa;
                 }
-                
                 .queue-info {
                     font-size: 12px;
                     color: #FF9800;
@@ -1376,14 +1371,12 @@ app.get('/', (req, res) => {
                     background: rgba(255,152,0,0.1);
                     border-radius: 5px;
                 }
-                
                 .batch-controls {
                     display: flex;
                     gap: 10px;
                     margin-top: 15px;
                     flex-wrap: wrap;
                 }
-                
                 @media (max-width: 768px) {
                     .main-content {
                         flex-direction: column;
@@ -1420,6 +1413,7 @@ app.get('/', (req, res) => {
                     <div style="margin-top:10px; font-size:12px;">
                         💎 Общие шарды: <span id="total-shards" style="color:var(--accent);">0</span> | 
                         📦 Общие спавнеры: <span id="total-spawners" style="color:#ff9800;">0</span> |
+                        💰 Общие деньги: $<span id="total-money" style="color:#FFC107;">0</span> |
                         🔄 В очереди: <span id="queue-size" style="color:#FF9800;">0</span>
                     </div>
                     <div class="proxy-info" id="proxy-info">
@@ -1439,6 +1433,16 @@ app.get('/', (req, res) => {
                     </button>
                     <button onclick="reconnectAll()" class="secondary">
                         🔄 ПЕРЕПОДКЛЮЧИТЬ ВСЕХ
+                    </button>
+                    <button onclick="sellAllItems()" class="success">
+                        💰 ПРОДАТЬ ПРЕДМЕТЫ
+                    </button>
+                    <button onclick="showTransferModal()" style="background: #FFC107; color: black;">
+                        💸 ПРОСТОЙ ПЕРЕВОД
+                    </button>
+                    <!-- НОВАЯ КНОПКА ДЛЯ КОНСОЛИДАЦИИ -->
+                    <button onclick="consolidateMoney()" style="background: #9c27b0; color: white;">
+                        🔀 КОНСОЛИДАЦИЯ ДЕНЕГ
                     </button>
                     <button onclick="showSettings()" style="background: #2196F3;">
                         ⚙️ НАСТРОЙКИ
@@ -1469,12 +1473,10 @@ app.get('/', (req, res) => {
 nick1 - token1
 nick2 - token2
 ..."></textarea>
-                                
                                 <div class="batch-controls">
                                     <button onclick="addBulk()" style="flex-grow: 1;">🚀 НАЧАТЬ ДОБАВЛЕНИЕ</button>
                                     <button onclick="document.getElementById('bulk').value = ''" class="secondary">✖️</button>
                                 </div>
-                                
                                 <div style="margin-top: 10px; font-size: 11px; color: #777;">
                                     Аккаунты добавляются партиями по ${config.batchSize} с задержкой ${config.delayBetweenBatches/1000} сек. между партиями
                                 </div>
@@ -1484,33 +1486,27 @@ nick2 - token2
                         <div id="progress-tab" class="tab-content">
                             <div style="margin-bottom: 15px;">
                                 <h4 style="margin: 0 0 10px 0; color: var(--accent);">📊 Прогресс добавления</h4>
-                                
                                 <div class="progress-container" id="progress-container" style="display: none;">
                                     <div style="display: flex; justify-content: space-between; align-items: center;">
                                         <span id="progress-status">Добавление не активно</span>
                                         <span class="status-dot status-adding" id="progress-status-dot"></span>
                                     </div>
-                                    
                                     <div class="progress-bar">
                                         <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
                                     </div>
-                                    
                                     <div class="progress-info">
                                         <span>Добавлено: <b id="progress-added">0</b> / <b id="progress-total">0</b></span>
                                         <span>Осталось: <b id="progress-pending">0</b></span>
                                     </div>
-                                    
                                     <div class="progress-info">
                                         <span>Партия: <b id="progress-batch">0</b> / <b id="progress-total-batches">0</b></span>
                                         <span>В очереди: <b id="progress-queue">0</b></span>
                                     </div>
-                                    
                                     <div class="batch-controls">
                                         <button onclick="continueAdding()" class="success" id="continue-btn" style="display: none;">▶️ ПРОДОЛЖИТЬ</button>
                                         <button onclick="stopAdding()" class="danger" id="stop-btn" style="display: none;">⏹️ ОСТАНОВИТЬ</button>
                                     </div>
                                 </div>
-                                
                                 <div id="no-progress" style="text-align: center; padding: 20px; color: #777;">
                                     Нет активного процесса добавления
                                 </div>
@@ -1550,7 +1546,6 @@ nick2 - token2
                                     <div>В очереди: <span id="server-queue">0</span></div>
                                 </div>
                             </div>
-                            
                             <div style="margin-top: 15px; padding: 10px; background: rgba(0,255,0,0.1); border-radius: 5px; border: 1px solid #4CAF50;">
                                 <small style="color: #4CAF50;">✅ Для больших объемов:</small><br>
                                 <small style="color: #777; font-size: 10px;">
@@ -1574,6 +1569,11 @@ nick2 - token2
                     <div class="form-group">
                         <label>Ник для TP по умолчанию:</label>
                         <input type="text" id="config-tp-nick" value="${config.defaultTpNick}">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Ник для денег (конечный получатель):</label>
+                        <input type="text" id="config-money-nick" value="${config.moneyTargetNick || ''}">
                     </div>
                     
                     <div class="form-group">
@@ -1632,19 +1632,50 @@ nick2 - token2
                 </div>
             </div>
 
+            <!-- Модальное окно простого перевода -->
+            <div id="transferModal" class="modal">
+                <div class="modal-content" style="max-width: 400px;">
+                    <h3 style="margin-top: 0; color: #FFC107;">💸 ПРОСТОЙ ПЕРЕВОД</h3>
+                    <div class="form-group">
+                        <label>Ник получателя:</label>
+                        <input type="text" id="transfer-target" placeholder="Введите ник" style="width: 100%;">
+                    </div>
+                    <div class="action-buttons">
+                        <button onclick="startTransfer()" class="warning">💸 ПЕРЕВЕСТИ ВСЕМ</button>
+                        <button onclick="closeTransferModal()" class="secondary">✖️ ОТМЕНА</button>
+                    </div>
+                    <small style="color: #aaa; display: block; margin-top: 10px;">
+                        Деньги будут переведены от всех ботов, у которых есть баланс, напрямую.
+                    </small>
+                </div>
+            </div>
+
+            <!-- Модальное окно для консолидации (можно без ввода, используем ник из настроек) -->
+            <div id="consolidateModal" class="modal">
+                <div class="modal-content" style="max-width: 400px;">
+                    <h3 style="margin-top: 0; color: #9c27b0;">🔀 КОНСОЛИДАЦИЯ ДЕНЕГ</h3>
+                    <div class="form-group">
+                        <label>Ник получателя (можно изменить):</label>
+                        <input type="text" id="consolidate-target" placeholder="Введите ник" style="width: 100%;" value="${config.moneyTargetNick || ''}">
+                    </div>
+                    <div class="action-buttons">
+                        <button onclick="startConsolidate()" class="success" style="background:#9c27b0;">🔀 ЗАПУСТИТЬ</button>
+                        <button onclick="closeConsolidateModal()" class="secondary">✖️ ОТМЕНА</button>
+                    </div>
+                    <small style="color: #aaa; display: block; margin-top: 10px;">
+                        Деньги будут собраны по двухуровневой схеме и переведены на указанный ник.
+                    </small>
+                </div>
+            </div>
+
             <script>
                 let config = ${JSON.stringify(config)};
                 let globalStats = {};
                 let currentProgress = {};
                 
                 function showTab(tabId) {
-                    document.querySelectorAll('.tab-content').forEach(tab => {
-                        tab.classList.remove('active');
-                    });
-                    document.querySelectorAll('.tab-button').forEach(btn => {
-                        btn.classList.remove('active');
-                    });
-                    
+                    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+                    document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
                     document.getElementById(tabId).classList.add('active');
                     event.target.classList.add('active');
                 }
@@ -1667,6 +1698,7 @@ nick2 - token2
                             accent: document.getElementById('config-accent').value
                         },
                         defaultTpNick: document.getElementById('config-tp-nick').value,
+                        moneyTargetNick: document.getElementById('config-money-nick').value,
                         autoCollectThreshold: parseInt(document.getElementById('config-threshold').value) || 1,
                         batchSize: parseInt(document.getElementById('config-batch-size').value) || 100,
                         delayBetweenBatches: (parseInt(document.getElementById('config-batch-delay').value) || 60) * 1000,
@@ -1702,37 +1734,25 @@ nick2 - token2
                 
                 function forceBuyAll() {
                     if (confirm('Запустить покупку спавнеров у всех ботов с балансом ≥500 шардов?')) {
-                        fetch('/force-buy', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({})
-                        }).then(r => r.json()).then(data => {
-                            alert('Запущена покупка для ' + data.count + ' ботов');
-                        });
+                        fetch('/force-buy', { method: 'POST' })
+                            .then(r => r.json())
+                            .then(data => alert('Запущена покупка для ' + data.count + ' ботов'));
                     }
                 }
                 
                 function afkAll() {
                     if (confirm('Отправить всех онлайн ботов в AFK?')) {
-                        fetch('/afk-all', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({})
-                        }).then(r => r.json()).then(data => {
-                            alert('Отправлено в AFK: ' + data.count + ' ботов');
-                        });
+                        fetch('/afk-all', { method: 'POST' })
+                            .then(r => r.json())
+                            .then(data => alert('Отправлено в AFK: ' + data.count + ' ботов'));
                     }
                 }
                 
                 function reconnectAll() {
-                    if (confirm('Принудительно переподключить всех ботов? Это поможет при проблемах с сетью.')) {
-                        fetch('/reconnect-all', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({})
-                        }).then(r => r.json()).then(data => {
-                            alert('Переподключение запущено для ' + data.count + ' ботов');
-                        });
+                    if (confirm('Принудительно переподключить всех ботов?')) {
+                        fetch('/reconnect-all', { method: 'POST' })
+                            .then(r => r.json())
+                            .then(data => alert('Переподключение запущено для ' + data.count + ' ботов'));
                     }
                 }
                 
@@ -1743,72 +1763,47 @@ nick2 - token2
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({botName})
                         }).then(r => r.json()).then(data => {
-                            if (data.ok) {
-                                alert('Переподключение запущено');
-                            } else {
-                                alert('Ошибка: ' + data.error);
-                            }
+                            if (data.ok) alert('Переподключение запущено');
+                            else alert('Ошибка: ' + data.error);
                         });
                     }
                 }
                 
                 function continueAdding() {
                     if (confirm('Продолжить добавление аккаунтов?')) {
-                        fetch('/continue-adding', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({})
-                        }).then(r => r.json()).then(data => {
-                            if (data.success) {
-                                alert(data.message);
-                                updateProgress();
-                            } else {
-                                alert(data.message);
-                            }
-                        });
+                        fetch('/continue-adding', { method: 'POST' })
+                            .then(r => r.json()).then(data => {
+                                if (data.success) alert(data.message);
+                                else alert(data.message);
+                            });
                     }
                 }
                 
                 function stopAdding() {
                     if (confirm('Остановить добавление аккаунтов?')) {
-                        fetch('/stop-adding', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({})
-                        }).then(r => r.json()).then(data => {
-                            if (data.success) {
-                                alert(data.message);
-                                updateProgress();
-                            }
-                        });
+                        fetch('/stop-adding', { method: 'POST' })
+                            .then(r => r.json()).then(data => {
+                                if (data.success) alert(data.message);
+                            });
                     }
                 }
                 
                 function loadFromFile() {
                     if (confirm('Загрузить аккаунты из файла accounts.txt?')) {
-                        fetch('/add-from-file', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({})
-                        }).then(r => r.json()).then(data => {
-                            alert('Загрузка из файла запущена: ' + data.count + ' аккаунтов');
-                            updateProgress();
-                        });
+                        fetch('/add-from-file', { method: 'POST' })
+                            .then(r => r.json()).then(data => {
+                                alert('Загрузка из файла запущена: ' + data.count + ' аккаунтов');
+                                updateProgress();
+                            });
                     }
                 }
                 
                 function clearAccountsFile() {
-                    if (confirm('Очистить файл accounts.txt? Это не удалит уже запущенные аккаунты.')) {
-                        fetch('/clear-accounts-file', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({})
-                        }).then(r => r.json()).then(data => {
-                            if (data.ok) {
-                                alert('Файл аккаунтов очищен');
-                                updateFileInfo();
-                            }
-                        });
+                    if (confirm('Очистить файл accounts.txt?')) {
+                        fetch('/clear-accounts-file', { method: 'POST' })
+                            .then(r => r.json()).then(data => {
+                                if (data.ok) alert('Файл аккаунтов очищен');
+                            });
                     }
                 }
                 
@@ -1840,15 +1835,10 @@ nick2 - token2
                 function updateProgress() {
                     fetch('/progress').then(r => r.json()).then(data => {
                         currentProgress = data;
-                        
                         if (data.total > 0) {
-                            // Показываем контейнер прогресса
                             document.getElementById('progress-container').style.display = 'block';
                             document.getElementById('no-progress').style.display = 'none';
-                            
-                            // Обновляем данные
                             const percent = data.total > 0 ? Math.round((data.added / data.total) * 100) : 0;
-                            
                             document.getElementById('progress-fill').style.width = percent + '%';
                             document.getElementById('progress-added').innerText = data.added;
                             document.getElementById('progress-total').innerText = data.total;
@@ -1856,8 +1846,6 @@ nick2 - token2
                             document.getElementById('progress-batch').innerText = data.currentBatch;
                             document.getElementById('progress-total-batches').innerText = data.totalBatches;
                             document.getElementById('progress-queue').innerText = data.pending;
-                            
-                            // Обновляем статус
                             if (data.isAdding) {
                                 document.getElementById('progress-status').innerText = 'Добавляется...';
                                 document.getElementById('progress-status-dot').style.backgroundColor = '#FF9800';
@@ -1875,24 +1863,20 @@ nick2 - token2
                                 document.getElementById('stop-btn').style.display = 'none';
                             }
                         } else {
-                            // Скрываем контейнер прогресса
                             document.getElementById('progress-container').style.display = 'none';
                             document.getElementById('no-progress').style.display = 'block';
                         }
                     });
                 }
                 
-                // Связываем color inputs с text inputs
                 document.addEventListener('DOMContentLoaded', function() {
                     const colorInputs = ['primary', 'secondary', 'accent'];
                     colorInputs.forEach(id => {
                         const color = document.getElementById('config-' + id);
                         const text = document.getElementById('config-' + id + '-text');
-                        
                         color.addEventListener('input', () => text.value = color.value);
                         text.addEventListener('input', () => color.value = text.value);
                     });
-                    
                     updateProxyInfo();
                     updateFileInfo();
                     updateProgress();
@@ -1909,12 +1893,8 @@ nick2 - token2
                 function addBulk() {
                     const text = document.getElementById('bulk').value;
                     if(!text) return alert('Введите токены!');
-                    
                     const lines = text.split('\\n').filter(l => l.trim());
-                    if (lines.length > 5000) {
-                        return alert('Слишком много аккаунтов! Максимум 5000.');
-                    }
-                    
+                    if (lines.length > 5000) return alert('Слишком много аккаунтов! Максимум 5000.');
                     fetch('/add-bulk', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
@@ -1973,6 +1953,85 @@ nick2 - token2
                     }
                 }
                 
+                function sellAllItems() {
+                    if (!confirm('Запустить продажу предметов у всех ботов?')) return;
+                    fetch('/sell-all', { method: 'POST' })
+                        .then(r => r.json())
+                        .then(data => alert('Продажа запущена для ' + data.count + ' ботов'));
+                }
+                
+                function showTransferModal() {
+                    document.getElementById('transferModal').style.display = 'flex';
+                }
+                
+                function closeTransferModal() {
+                    document.getElementById('transferModal').style.display = 'none';
+                }
+                
+                function startTransfer() {
+                    const target = document.getElementById('transfer-target').value.trim();
+                    if (!target) {
+                        alert('Введите ник получателя');
+                        return;
+                    }
+                    fetch('/transfer-all', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ targetNick: target })
+                    }).then(r => r.json()).then(data => {
+                        alert('Запущен перевод для ' + data.count + ' ботов');
+                        closeTransferModal();
+                    }).catch(err => {
+                        alert('Ошибка: ' + err.message);
+                    });
+                }
+                
+                function transferSingle(botName) {
+                    const target = prompt('Ник получателя:');
+                    if (target) {
+                        fetch('/transfer-single', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ botName, targetNick: target })
+                        }).then(r => r.json()).then(data => {
+                            if (data.ok) alert('Перевод запущен');
+                            else alert('Ошибка: ' + data.error);
+                        });
+                    }
+                }
+                
+                // Функции для консолидации
+                function consolidateMoney() {
+                    document.getElementById('consolidate-target').value = config.moneyTargetNick || '';
+                    document.getElementById('consolidateModal').style.display = 'flex';
+                }
+                
+                function closeConsolidateModal() {
+                    document.getElementById('consolidateModal').style.display = 'none';
+                }
+                
+                function startConsolidate() {
+                    const target = document.getElementById('consolidate-target').value.trim();
+                    if (!target) {
+                        alert('Введите ник получателя');
+                        return;
+                    }
+                    fetch('/consolidate-money', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ targetNick: target })
+                    }).then(r => r.json()).then(data => {
+                        if (data.success) {
+                            alert('Консолидация запущена для ' + data.count + ' ботов методом: ' + data.method);
+                        } else {
+                            alert('Ошибка: ' + data.message);
+                        }
+                        closeConsolidateModal();
+                    }).catch(err => {
+                        alert('Ошибка: ' + err.message);
+                    });
+                }
+                
                 function getTimeLeft(expiry) {
                     const diff = expiry - Date.now();
                     if (diff <= 0) return '<span style="color:#f44336;">Истек</span>';
@@ -1982,11 +2041,8 @@ nick2 - token2
                 }
                 
                 function update() {
-                    // Запрашиваем общую статистику
                     fetch('/stats').then(r => r.json()).then(stats => {
                         globalStats = stats;
-                        
-                        // Обновляем глобальную статистику
                         document.getElementById('stat-total').innerText = stats.totalAccounts;
                         document.getElementById('stat-on').innerText = stats.online;
                         document.getElementById('stat-err').innerText = stats.errors;
@@ -1995,6 +2051,7 @@ nick2 - token2
                         document.getElementById('stat-collecting').innerText = stats.collecting;
                         document.getElementById('total-shards').innerText = stats.totalShards.toLocaleString();
                         document.getElementById('total-spawners').innerText = stats.totalSpawners;
+                        document.getElementById('total-money').innerText = stats.totalMoney.toLocaleString();
                         document.getElementById('accounts-count').innerText = stats.totalAccounts + '/5000';
                         document.getElementById('server-active').innerText = stats.online;
                         document.getElementById('server-errors').innerText = stats.errors;
@@ -2002,37 +2059,33 @@ nick2 - token2
                         document.getElementById('queue-size').innerText = stats.connectionQueue || 0;
                     });
                     
-                    // Запрашиваем детальный статус ботов
                     fetch('/status').then(r => r.json()).then(data => {
                         const div = document.getElementById('list');
                         div.innerHTML = '';
-                        
                         for(const [n, info] of Object.entries(data)) {
                             let color = info.error ? '#f44336' : 
                                       (info.isBuying ? '#9c27b0' :
                                       (info.isCollecting ? '#FF9800' :
                                       (info.online ? (info.isAfk ? '#2196F3' : config.theme.primary) : 
                                       (info.status.includes('Подключение') ? '#FF9800' : '#777'))));
-                            
                             let statusColor = info.error ? 'status-error' :
                                             info.isBuying ? 'status-buying' :
                                             info.isCollecting ? 'status-collecting' :
                                             info.online ? (info.isAfk ? 'status-afk' : 'status-online') :
                                             info.status.includes('Подключение') ? 'status-connecting' : 'status-offline';
-                            
                             let actionButtons = '';
-                            
                             if (info.online && !info.error) {
                                 if (!info.isCollecting) {
                                     actionButtons += \`<button onclick="goAfk('\${n}')" class="secondary" style="margin:2px; padding:4px 8px; font-size:11px;">💤</button>\`;
                                 }
                                 actionButtons += \`<button onclick="collect('\${n}')" class="secondary" style="margin:2px; padding:4px 8px; font-size:11px;">📦</button>\`;
                             }
-                            
                             if (info.shards >= 500 && !info.isBuying && !info.isCollecting && info.online) {
                                 actionButtons += \`<button onclick="forceBuy('\${n}')" class="success" style="margin:2px; padding:4px 8px; font-size:11px;">💰</button>\`;
                             }
-                            
+                            if (info.online && !info.error && info.balance > 0) {
+                                actionButtons += \`<button onclick="transferSingle('\${n}')" class="warning" style="margin:2px; padding:4px 8px; font-size:11px;">💸</button>\`;
+                            }
                             actionButtons += \`<button onclick="reconnectBot('\${n}')" class="info" style="margin:2px; padding:4px 8px; font-size:11px;">🔄</button>\`;
                             
                             div.innerHTML += \`
@@ -2054,6 +2107,7 @@ nick2 - token2
                                             💎 \${(info.shards || 0).toLocaleString()}\${info.shards >= 500 ? ' ✓' : ''}
                                         </span><br>
                                         <span style="color:#ff9800; font-size:13px;">📦 \${info.spawners || 0} спавнеров</span><br>
+                                        <span style="color:#FFC107; font-size:13px;">💵 $\${(info.balance || 0).toLocaleString()}</span><br>
                                         <div style="margin-top: 5px;">
                                             \${actionButtons}
                                         </div>
@@ -2062,19 +2116,19 @@ nick2 - token2
                         }
                     });
                     
-                    // Обновляем статистику сервера
                     fetch('/server-status').then(r => r.json()).then(data => {
                         document.getElementById('server-uptime').innerText = Math.floor(data.uptime);
                         document.getElementById('server-ram').innerText = Math.round(data.memory.heapUsed / 1024 / 1024);
                     });
                 }
                 
-                // Закрытие модального окна по клику вне его
                 window.onclick = function(event) {
-                    const modal = document.getElementById('settingsModal');
-                    if (event.target == modal) {
-                        closeSettings();
-                    }
+                    const settingsModal = document.getElementById('settingsModal');
+                    const transferModal = document.getElementById('transferModal');
+                    const consolidateModal = document.getElementById('consolidateModal');
+                    if (event.target == settingsModal) closeSettings();
+                    if (event.target == transferModal) closeTransferModal();
+                    if (event.target == consolidateModal) closeConsolidateModal();
                 }
                 
                 setInterval(update, 3000);
@@ -2087,11 +2141,10 @@ nick2 - token2
     `);
 });
 
-// Новые API endpoints
+// Остальные endpoints (force-buy-single, force-buy, go-afk, afk-all) оставляем без изменений
 app.post('/force-buy-single', (req, res) => {
     const { botName } = req.body;
     const botData = activeBots[botName];
-    
     if (botData && botData.botInstance && botData.shards >= 500 && !botData.isBuying) {
         buySpawner(botData.botInstance, botName);
         res.json({ ok: true });
@@ -2102,30 +2155,20 @@ app.post('/force-buy-single', (req, res) => {
 
 app.post('/force-buy', (req, res) => {
     let count = 0;
-    
     for (const [username, botData] of Object.entries(activeBots)) {
-        if (botData.online && 
-            !botData.error && 
-            !botData.isBuying && 
-            !botData.isCollecting && 
-            botData.shards >= 500 &&
-            botData.botInstance) {
-            
+        if (botData.online && !botData.error && !botData.isBuying && !botData.isCollecting && botData.shards >= 500 && botData.botInstance) {
             setTimeout(() => {
                 buySpawner(botData.botInstance, username);
             }, count * 3000);
-            
             count++;
         }
     }
-    
     res.json({ ok: true, count });
 });
 
 app.post('/go-afk', (req, res) => {
     const { botName } = req.body;
     const botData = activeBots[botName];
-    
     if (botData && botData.botInstance && botData.online && !botData.isCollecting) {
         goToAfk(botData.botInstance, botName);
         res.json({ ok: true });
@@ -2136,38 +2179,25 @@ app.post('/go-afk', (req, res) => {
 
 app.post('/afk-all', (req, res) => {
     let count = 0;
-    
     for (const [username, botData] of Object.entries(activeBots)) {
-        if (botData.online && 
-            !botData.error && 
-            !botData.isCollecting && 
-            !botData.isBuying &&
-            botData.botInstance) {
-            
+        if (botData.online && !botData.error && !botData.isCollecting && !botData.isBuying && botData.botInstance) {
             setTimeout(() => {
                 goToAfk(botData.botInstance, username);
             }, count * 2000);
-            
             count++;
         }
     }
-    
     res.json({ ok: true, count });
 });
 
-// Запуск сервера
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Сервер запущен на порту ${PORT}`);
     console.log(`Панель управления: http://localhost:${PORT}`);
     console.log(`Загружено прокси: ${getProxies().length}`);
     console.log(`Аккаунтов в файле: ${loadAccountsFromFile().length}`);
-    
-    // Автоматически продолжаем добавление при перезагрузке
     if (progress.pending > 0 && !progress.isAdding) {
         console.log(`Обнаружены недобавленные аккаунты (${progress.pending} шт.). Можно продолжить через интерфейс.`);
     }
-    
-    // Запускаем обновление статистики каждые 30 секунд
     setInterval(updateStats, 30000);
 });
