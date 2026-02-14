@@ -203,14 +203,11 @@ async function collectAllBotsWithSpawners(targetNick = config.defaultTpNick) {
         }
     }
     if (botsToCollect.length === 0) return { success: false, message: 'Нет ботов для сбора' };
-    
-    // Запускаем всех сразу (или с задержкой 200 мс)
     for (let i = 0; i < botsToCollect.length; i++) {
         const { username, bot } = botsToCollect[i];
-        // Убираем задержку или ставим 200 мс
         setTimeout(() => {
             startCollect(bot, username, targetNick);
-        }, i * 200); // 200 мс между ботами
+        }, i * 2000);
     }
     return { success: true, count: botsToCollect.length };
 }
@@ -253,31 +250,14 @@ async function buySpawner(bot, username) {
 }
 
 // ---------- НОВЫЙ БЛОК: ПРЕДМЕТЫ ДЛЯ ПРОДАЖИ И ФУНКЦИИ ----------
-const SELL_ITEMS_NAMES = [
-    'stone sword',           // с пробелом
-    'stone_sword',           // с подчёркиванием
-    'chainmail leggings',
+const SELL_ITEMS = [
+    'stone_sword',
     'chainmail_leggings',
-    'chainmail chestplate',
     'chainmail_chestplate',
-    'chainmail boots',
     'chainmail_boots',
-    'chainmail helmet',
     'chainmail_helmet',
-    'steak',
-    'cooked_beef'
+    'steak'
 ];
-
-// Функция проверки, нужно ли продавать предмет
-function shouldSellItem(item) {
-    if (!item) return false;
-    // проверяем по displayName (то, что видно в чате)
-    const displayName = item.displayName ? item.displayName.toLowerCase() : '';
-    const name = item.name ? item.name.toLowerCase() : '';
-    return SELL_ITEMS_NAMES.some(sellName => 
-        displayName.includes(sellName) || name.includes(sellName)
-    );
-}
 
 function formatMoney(amount) {
     if (amount >= 1e9) return (amount / 1e9).toFixed(2) + 'B';
